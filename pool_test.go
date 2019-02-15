@@ -7,23 +7,6 @@ import (
 	"time"
 )
 
-func TestNewPoolTask(t *testing.T) {
-	pool := NewPool(1000, false)
-
-	for i := 0; i < 10000; i++ {
-		pool.PushTask(func(i []interface{}) {
-			time.Sleep(time.Second)
-		}, []interface{}{})
-	}
-	go func() {
-		for {
-			pool.getInit()
-			time.Sleep(time.Second * 2)
-		}
-	}()
-	time.Sleep(time.Minute * 2)
-}
-
 func BenchmarkNewPoolTask(b *testing.B) {
 	//b.N = 1000
 	{
