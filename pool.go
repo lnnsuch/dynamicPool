@@ -102,10 +102,6 @@ func (d *dynamicPool) listenClear() {
 	}
 }
 
-func (d *dynamicPool) getInit() {
-	fmt.Println("run", d.running, "work len", len(d.workers))
-}
-
 type dynamicPoolJam struct {
 	*dynamicPool
 	freeSign *sync.Cond // 任务处理完成发送信号
