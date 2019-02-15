@@ -2,7 +2,6 @@ package dynamicPool
 
 import (
 	"container/list"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -21,9 +20,15 @@ type worker struct {
 
 func (w *worker) run() {
 	go func() {
-		for v := range w.task {
-			v.f(v.params)
-			w.pool.putTask(w)
+		task := time.NewTicker(time.Second * 10)
+		for {
+			select {
+			case v := <- w.task:
+				v.f(v.params)
+				w.pool.putTask(w)
+			case <- task.C:
+				w.pool.clearTask()
+			}
 		}
 	}()
 }
@@ -59,6 +64,7 @@ type Pool interface {
 	getWork() *worker
 	putTask(work *worker)
 	PushTask(f task, params []interface{})
+	clearTask()
 }
 
 func NewPool(maxSize uint32, isJam bool) Pool {
@@ -74,32 +80,21 @@ type dynamicPool struct {
 	running  uint32    // 当前运行的任务数
 	workers  []*worker // 可复用的任务
 	lock     sync.Mutex
-	once     sync.Once
-	clear    chan struct{}
 }
 
 func newDynamicPool(maxSize uint32) *dynamicPool {
 	p := &dynamicPool{
 		capacity: maxSize,
-		clear:    make(chan struct{}),
 	}
-	go p.listenClear()
 	return p
 }
 
-func (d *dynamicPool) listenClear() {
-	tick := time.NewTicker(time.Second * 30)
-	for {
-		select {
-		case <-d.clear:
-		case <-tick.C:
-			d.lock.Lock()
-			clearLen := len(d.workers)
-			d.workers = d.workers[:0:0]
-			d.running -= uint32(clearLen)
-			d.lock.Unlock()
-		}
-	}
+func (d *dynamicPool) clearTask()  {
+	d.lock.Lock()
+	clearLen := len(d.workers)
+	d.workers = d.workers[:0:0]
+	d.running -= uint32(clearLen)
+	d.lock.Unlock()
 }
 
 type dynamicPoolJam struct {
@@ -146,7 +141,6 @@ func (p *dynamicPoolJam) putTask(work *worker) {
 }
 
 func (p *dynamicPoolJam) PushTask(f task, params []interface{}) {
-	p.clear <- struct{}{}
 	p.getWork().task <- &sendFun{f, params}
 }
 
@@ -195,6 +189,5 @@ func (p *dynamicPoolNotJam) putTask(work *worker) {
 }
 
 func (p *dynamicPoolNotJam) PushTask(f task, params []interface{}) {
-	p.clear <- struct{}{}
 	p.getWork().task <- &sendFun{f, params}
 }
