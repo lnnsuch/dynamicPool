@@ -59,7 +59,6 @@ type Pool interface {
 	getWork() *worker
 	putTask(work *worker)
 	PushTask(f task, params []interface{})
-	getInit()
 }
 
 func NewPool(maxSize uint32, isJam bool) Pool {
@@ -96,7 +95,6 @@ func (d *dynamicPool) listenClear() {
 		case <-tick.C:
 			d.lock.Lock()
 			clearLen := len(d.workers)
-			fmt.Println("clear", clearLen, "run", d.running)
 			d.workers = d.workers[:0:0]
 			d.running -= uint32(clearLen)
 			d.lock.Unlock()
