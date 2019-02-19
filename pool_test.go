@@ -121,16 +121,35 @@ func BenchmarkNewPoolTask(b *testing.B) {
 }
 
 func TestNewDynamicPool(t *testing.T) {
-	pool := NewPool(100, true)
-	var wg sync.WaitGroup
-	for i := 0; i < 100000; i++ {
-		wg.Add(1)
-		pool.PushTask(func(i []interface{}) {
-			time.Sleep(time.Millisecond * 10)
-			wg.Done()
-		}, []interface{}{})
-	}
-	fmt.Println("push over", time.Now())
-	wg.Wait()
-	fmt.Println("exec over", time.Now())
+	t.Run("jam", func(t *testing.T) {
+		pool := NewPool(100, true)
+		var wg sync.WaitGroup
+		for i := 0; i < 100000; i++ {
+			wg.Add(1)
+			pool.PushTask(func(i []interface{}) {
+				time.Sleep(time.Millisecond * 10)
+				wg.Done()
+			}, []interface{}{})
+		}
+		fmt.Println("push over", time.Now())
+		wg.Wait()
+		fmt.Println("exec over", time.Now())
+		pool.Cancel()
+	})
+	t.Run("not jam", func(t *testing.T) {
+		pool := NewPool(100, false)
+		var wg sync.WaitGroup
+		for i := 0; i < 100000; i++ {
+			wg.Add(1)
+			pool.PushTask(func(i []interface{}) {
+				time.Sleep(time.Millisecond * 10)
+				wg.Done()
+			}, []interface{}{})
+		}
+		fmt.Println("push over", time.Now())
+		wg.Wait()
+		fmt.Println("exec over", time.Now())
+		pool.Cancel()
+	})
 }
+
