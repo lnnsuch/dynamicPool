@@ -2,9 +2,12 @@ package dynamicPool
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 )
+
+const workClearInterval = time.Second * 10
 
 type task func([]interface{})
 
@@ -13,49 +16,42 @@ type sendFun struct {
 	params []interface{}
 }
 
+func newSendFun(f task, params []interface{}) *sendFun {
+	return &sendFun{f, params}
+}
+
 type worker struct {
-	pool Pool
-	task chan *sendFun
+	pool   Pool
+	task   chan *sendFun
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func newWorker(p Pool) *worker {
+	ctx, cancel := context.WithCancel(p.getCtx())
+	work := &worker{
+		pool:   p,
+		task:   make(chan *sendFun, 1),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	go work.run()
+	return work
 }
 
 func (w *worker) run() {
-	go func() {
-		task := time.NewTicker(time.Second * 10)
-		for {
-			select {
-			case v := <- w.task:
-				v.f(v.params)
-				w.pool.putTask(w)
-			case <- task.C:
-				w.pool.clearTask()
-			}
-		}
-	}()
-}
-
-func (w *worker) pending() {
-	pending := list.New()
-	var mux sync.Mutex
-	go func() {
-		for {
-			mux.Lock()
-			front := pending.Front()
-			if front == nil {
-				mux.Unlock()
-				time.Sleep(time.Millisecond * 10)
-				continue
-			}
-			fun := pending.Remove(front).(*sendFun)
-			mux.Unlock()
-			w.pool.PushTask(fun.f, fun.params)
-		}
-	}()
+	timer := time.NewTimer(workClearInterval)
 	for {
 		select {
-		case fun := <-w.task:
-			mux.Lock()
-			pending.PushBack(fun)
-			mux.Unlock()
+		case <-w.ctx.Done():
+			timer.Stop()
+			return
+		case v := <-w.task:
+			v.f(v.params)
+			w.pool.putTask(w)
+			timer.Reset(workClearInterval)
+		case <-timer.C:
+			w.pool.clearTask()
 		}
 	}
 }
@@ -65,13 +61,16 @@ type Pool interface {
 	putTask(work *worker)
 	PushTask(f task, params []interface{})
 	clearTask()
+	Cancel()
+	getCtx() context.Context
 }
 
 func NewPool(maxSize uint32, isJam bool) Pool {
+	p := newDynamicPool(maxSize)
 	if isJam {
-		return newDynamicPoolJam(maxSize)
+		return newDynamicPoolJam(p)
 	} else {
-		return newDynamicPoolNotJam(maxSize)
+		return newDynamicPoolNotJam(p)
 	}
 }
 
@@ -80,21 +79,38 @@ type dynamicPool struct {
 	running  uint32    // 当前运行的任务数
 	workers  []*worker // 可复用的任务
 	lock     sync.Mutex
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 func newDynamicPool(maxSize uint32) *dynamicPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &dynamicPool{
 		capacity: maxSize,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	return p
 }
 
-func (d *dynamicPool) clearTask()  {
+func (d *dynamicPool) clearTask() {
 	d.lock.Lock()
 	clearLen := len(d.workers)
+	clearWorkers := d.workers
 	d.workers = d.workers[:0:0]
 	d.running -= uint32(clearLen)
 	d.lock.Unlock()
+	for _, v := range clearWorkers {
+		v.cancel()
+	}
+}
+
+func (d *dynamicPool) Cancel() {
+	d.cancel()
+}
+
+func (d *dynamicPool) getCtx() context.Context {
+	return d.ctx
 }
 
 type dynamicPoolJam struct {
@@ -102,9 +118,9 @@ type dynamicPoolJam struct {
 	freeSign *sync.Cond // 任务处理完成发送信号
 }
 
-func newDynamicPoolJam(maxSize uint32) *dynamicPoolJam {
+func newDynamicPoolJam(p *dynamicPool) *dynamicPoolJam {
 	pool := &dynamicPoolJam{
-		dynamicPool: newDynamicPool(maxSize),
+		dynamicPool: p,
 	}
 	pool.freeSign = sync.NewCond(&pool.lock)
 	return pool
@@ -120,11 +136,7 @@ func (p *dynamicPoolJam) getWork() *worker {
 			p.workers = p.workers[1:]
 		} else if p.capacity > p.running {
 			p.running++
-			w = &worker{
-				pool: p,
-				task: make(chan *sendFun),
-			}
-			w.run()
+			w = newWorker(p)
 		}
 		if w != nil {
 			return w
@@ -141,23 +153,27 @@ func (p *dynamicPoolJam) putTask(work *worker) {
 }
 
 func (p *dynamicPoolJam) PushTask(f task, params []interface{}) {
-	p.getWork().task <- &sendFun{f, params}
+	select {
+	case <-p.ctx.Done():
+		return
+	default:
+		p.getWork().task <- newSendFun(f, params)
+	}
 }
 
 type dynamicPoolNotJam struct {
 	*dynamicPool
-	waitTask *worker
+	pending struct{
+		list *list.List
+		mux sync.Mutex
+	}
 }
 
-func newDynamicPoolNotJam(maxSize uint32) *dynamicPoolNotJam {
+func newDynamicPoolNotJam(p *dynamicPool) *dynamicPoolNotJam {
 	pool := &dynamicPoolNotJam{
-		dynamicPool: newDynamicPool(maxSize),
+		dynamicPool: p,
 	}
-	pool.waitTask = &worker{
-		pool: pool,
-		task: make(chan *sendFun),
-	}
-	go pool.waitTask.pending()
+	pool.pending.list = list.New()
 	return pool
 }
 
@@ -170,24 +186,39 @@ func (p *dynamicPoolNotJam) getWork() *worker {
 		p.workers = p.workers[1:]
 	} else if p.capacity > p.running {
 		p.running++
-		w = &worker{
-			pool: p,
-			task: make(chan *sendFun),
-		}
-		w.run()
+		w = newWorker(p)
 	}
-	if w != nil {
-		return w
-	}
-	return p.waitTask
+	return w
 }
 
 func (p *dynamicPoolNotJam) putTask(work *worker) {
-	p.lock.Lock()
-	p.workers = append(p.workers, work)
-	p.lock.Unlock()
+	p.pending.mux.Lock()
+	front := p.pending.list.Front()
+	if front == nil {
+		p.pending.mux.Unlock()
+		p.lock.Lock()
+		p.workers = append(p.workers, work)
+		p.lock.Unlock()
+	} else {
+		fun := p.pending.list.Remove(front).(*sendFun)
+		p.pending.mux.Unlock()
+		work.task <- fun
+	}
 }
 
 func (p *dynamicPoolNotJam) PushTask(f task, params []interface{}) {
-	p.getWork().task <- &sendFun{f, params}
+	select {
+	case <-p.ctx.Done():
+		return
+	default:
+		fun := newSendFun(f, params)
+		work := p.getWork()
+		if work == nil {
+			p.pending.mux.Lock()
+			p.pending.list.PushBack(fun)
+			p.pending.mux.Unlock()
+		} else {
+			work.task <- fun
+		}
+	}
 }
